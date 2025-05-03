@@ -1,5 +1,5 @@
 use quickjs_rusty::{
-    Context, ExecutionError, JsCompiledFunction, OwnedJsValue,
+    Context, ExecutionError, JsCompiledFunction, OwnedJsValue, ValueError,
     console::{ConsoleBackend, Level},
     serde::to_js,
 };
@@ -14,12 +14,14 @@ pub enum Error {
     #[error(transparent)]
     Execution(#[from] ExecutionError),
     #[error(transparent)]
+    Value(#[from] ValueError),
+    #[error(transparent)]
     Serde(#[from] quickjs_rusty::serde::Error),
 
-    #[cfg(feature = "ts")]
+    #[cfg(feature = "transpiling")]
     #[error(transparent)]
     Parse(#[from] deno_ast::ParseDiagnostic),
-    #[cfg(feature = "ts")]
+    #[cfg(feature = "transpiling")]
     #[error(transparent)]
     Transpile(#[from] deno_ast::TranspileError),
 
@@ -30,8 +32,19 @@ pub enum Error {
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum Script {
-    Function { args: Option<Value>, code: String },
-    CompiledFunction { args: Option<Value>, name: String },
+    Function {
+        args: Option<Value>,
+        code: String,
+    },
+    #[cfg(feature = "transpiling")]
+    Render {
+        args: Option<Value>,
+        code: String,
+    },
+    CompiledFunction {
+        args: Option<Value>,
+        name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -91,17 +104,27 @@ impl Runtime {
 
                 context.set_global("ctx", ctx).unwrap();
 
+                let opaque: *mut std::ffi::c_void = std::ptr::null_mut();
+
+                context.set_module_loader(
+                    Box::new(module_loader),
+                    Some(Box::new(module_normalize)),
+                    opaque,
+                );
+
+                context.run_module("/jsx-runtime").unwrap();
+
                 let mut compiled_fns = HashMap::new();
 
                 #[allow(unused_mut)]
                 functions.into_iter().for_each(|(name, mut code)| {
                     if name.ends_with(".ts") {
-                        #[cfg(feature = "ts")]
+                        #[cfg(feature = "transpiling")]
                         {
-                            code = transpile_ts(&code).unwrap();
+                            code = transpile(&code, None).unwrap();
                         }
 
-                        #[cfg(not(feature = "ts"))]
+                        #[cfg(not(feature = "transpiling"))]
                         {
                             panic!(
                                 "TypeScript is not supported. Enable the 'ts' feature to use it."
@@ -119,6 +142,14 @@ impl Runtime {
                 while let Ok(msg) = receiver.recv() {
                     match msg {
                         Message::ExecuteScript { script, respond_to } => {
+                            #[cfg(feature = "transpiling")]
+                            if let Script::Render { args, code } = script {
+                                let msg = Runtime::render_html(code, args, &context);
+                                _ = respond_to.send(msg);
+
+                                return;
+                            }
+
                             let source = Runtime::prepare(script, &compiled_fns);
 
                             let msg = match source {
@@ -150,6 +181,7 @@ impl Runtime {
 
                 Ok((args, Function::Compiled(function)))
             }
+            _ => Err(Error::Unexpected("Unsupported script type".into())),
         }
     }
 
@@ -172,6 +204,36 @@ impl Runtime {
             Function::Compiled(compiled_fn) => compiled_fn.eval()?,
         };
         let result = result.js_to_string()?;
+
+        let output = output.lock().unwrap();
+        let console_output = output.clone();
+
+        Ok(ScriptResult {
+            output: result,
+            console_output,
+        })
+    }
+
+    fn render_html(
+        source: String,
+        args: Option<Value>,
+        context: &Context,
+    ) -> Result<ScriptResult, Error> {
+        let console = Console::new();
+        let output = console.output.clone();
+
+        context.set_console(Box::new(console))?;
+
+        let js_context = unsafe { context.context_raw() };
+        let args = to_js(js_context, &args)?;
+        context.set_global("args", args)?;
+
+        let code = format!("const Component = {source};");
+        let code = transpile_jsx(&code)?;
+        let code = format!(r#"{}globalThis._html = Component(args)"#, code);
+
+        context.eval_module(&code, false)?;
+        let result = context.eval("globalThis._html;", false)?.to_string()?;
 
         let output = output.lock().unwrap();
         let console_output = output.clone();
@@ -225,12 +287,12 @@ impl ConsoleBackend for Console {
     }
 }
 
-#[cfg(feature = "ts")]
-fn transpile_ts(source: &str) -> Result<String, Error> {
-    let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+#[cfg(feature = "transpiling")]
+fn transpile(source: &str, ty: Option<deno_ast::MediaType>) -> Result<String, Error> {
+    let parsed = deno_ast::parse_script(deno_ast::ParseParams {
         specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
         text: source.into(),
-        media_type: deno_ast::MediaType::TypeScript,
+        media_type: ty.unwrap_or(deno_ast::MediaType::TypeScript),
         capture_tokens: false,
         scope_analysis: false,
         maybe_syntax: None,
@@ -255,6 +317,55 @@ fn transpile_ts(source: &str) -> Result<String, Error> {
         .into_source();
 
     Ok(res.text)
+}
+
+#[cfg(feature = "transpiling")]
+fn transpile_jsx(source: &str) -> Result<String, Error> {
+    let parsed = deno_ast::parse_script(deno_ast::ParseParams {
+        specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
+        text: source.into(),
+        media_type: deno_ast::MediaType::Jsx,
+        capture_tokens: false,
+        scope_analysis: false,
+        maybe_syntax: None,
+    })?;
+
+    let res = parsed
+        .transpile(
+            &deno_ast::TranspileOptions {
+                imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
+                jsx_factory: "jsx".into(),
+                jsx_automatic: true,
+                ..Default::default()
+            },
+            &deno_ast::TranspileModuleOptions {
+                ..Default::default()
+            },
+            &deno_ast::EmitOptions {
+                source_map: deno_ast::SourceMapOption::Separate,
+                inline_sources: true,
+                ..Default::default()
+            },
+        )?
+        .into_source();
+
+    Ok(res.text)
+}
+
+fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
+    if module_name == "/jsx-runtime" {
+        return Ok(include_str!("./js/jsx.js").into());
+    }
+
+    Err(anyhow::anyhow!(format!("Module {module_name} not found")))
+}
+
+fn module_normalize(
+    module_base_name: &str,
+    module_name: &str,
+    opaque: *mut std::ffi::c_void,
+) -> anyhow::Result<String> {
+    Ok(module_name.to_string())
 }
 
 #[cfg(test)]
@@ -301,12 +412,12 @@ mod tests {
         assert_eq!(res.output, "{\"name\":\"script\",\"args\":[\"a\",\"b\"]}");
     }
 
-    #[cfg(feature = "ts")]
+    #[cfg(feature = "transpiling")]
     #[test]
-    fn transpile() {
+    fn test_transpile_ts() {
         let source = "export type A = {args; any}; function a(args: A): {res: any} {};";
         assert_eq!(
-            transpile_ts(source.into()).unwrap(),
+            transpile(source.into(), None).unwrap(),
             "function a(args) {}\n"
         );
     }
@@ -328,7 +439,7 @@ mod tests {
         assert_eq!(res.output, "2");
     }
 
-    #[cfg(feature = "ts")]
+    #[cfg(feature = "transpiling")]
     #[tokio::test]
     async fn compile_ts() {
         let runtime = Runtime::new(RuntimeConfig {
@@ -381,6 +492,22 @@ mod tests {
         let res = compiled_fn.eval().unwrap().to_int().unwrap();
 
         assert_eq!(res, 4);
+    }
+
+    #[tokio::test]
+    async fn render_html() {
+        let runtime = Runtime::new(RuntimeConfig::default());
+        let res = runtime
+            .execute_script(Script::Render {
+                args: Some(
+                    json!({"items": [{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]}),
+                ),
+                code: "(props) => <ul>{props.items.map(({name}) => <li>{name}</li>)}</ul>".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(res.output, "<ul><li>first</li><li>second</li></ul>");
     }
 
     #[tokio::test]

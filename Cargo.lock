@@ -989,6 +989,7 @@ dependencies = [
 name = "js"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crossbeam",
  "deno_ast",
  "env_logger",
