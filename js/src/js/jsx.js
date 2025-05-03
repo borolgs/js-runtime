@@ -401,7 +401,7 @@ function attributesToString(attributes) {
   return result;
 }
 
-function jsxs(name, attrs) {
+export function jsxs(name, attrs) {
   // Calls the element creator function if the name is a function
   if (typeof name === "function") {
     return name(attrs);

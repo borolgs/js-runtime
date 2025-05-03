@@ -1,1 +1,3 @@
-pub mod js;
+mod js;
+
+pub use js::*;

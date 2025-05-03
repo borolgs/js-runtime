@@ -19,3 +19,21 @@ let res = runtime
 println!("{}", res.output); // 4
 println!("{}", (res.console_output); // hello!
 ```
+
+[Render jsx](./examples/axum-jsx/src/main.rs):
+
+```rust
+async fn items(runtime: js::Runtime) -> impl IntoResponse {
+    let items = json!({
+        "items": [
+            { "id": 1, "name": "Item A", "description": "This is the first item." },
+            { "id": 2, "name": "Item B", "description": "Another useful item." },
+            { "id": 3, "name": "Item C", "description": "Yet another item here." }
+        ]
+    });
+    runtime
+        .render(Some(items), include_str!("./pages/items.jsx"))
+        .await
+        .into_response()
+}
+```

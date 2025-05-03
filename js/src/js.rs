@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, fmt::Write};
 
+#[cfg(feature = "with-axum")]
+use axum::extract::FromRef;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -27,6 +30,18 @@ pub enum Error {
 
     #[error("unexpected")]
     Unexpected(String),
+}
+
+#[cfg(feature = "with-axum")]
+impl axum::response::IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            err => {
+                log::error!("{:?}", err);
+                "Unhandled error".into_response()
+            }
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -95,7 +110,7 @@ impl Runtime {
             let receiver = receiver.clone();
             let functions = functions.clone();
             std::thread::spawn(move || {
-                log::info!("worker spawned: {:?}", std::thread::current().id());
+                log::debug!("worker spawned: {:?}", std::thread::current().id());
                 let context = Context::builder().build().unwrap();
 
                 let js_context = unsafe { context.context_raw() };
@@ -214,11 +229,14 @@ impl Runtime {
         })
     }
 
-    fn render_html(
+    fn render_html<T>(
         source: String,
-        args: Option<Value>,
+        args: Option<T>,
         context: &Context,
-    ) -> Result<ScriptResult, Error> {
+    ) -> Result<ScriptResult, Error>
+    where
+        T: Serialize,
+    {
         let console = Console::new();
         let output = console.output.clone();
 
@@ -244,6 +262,31 @@ impl Runtime {
         })
     }
 
+    #[cfg(feature = "with-axum")]
+    pub async fn render(
+        &self,
+        args: Option<Value>,
+        function: &str,
+    ) -> impl axum::response::IntoResponse {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptResult, Error>>();
+
+        let msg = Message::ExecuteScript {
+            script: Script::Render {
+                args,
+                code: String::from(function),
+            },
+            respond_to: sender,
+        };
+
+        _ = self.sender.send(msg);
+
+        let res = receiver
+            .await
+            .map_err(|e| Error::Unexpected(e.to_string()))?;
+
+        res.map(|res| axum::response::Html(res.output))
+    }
+
     pub async fn execute_script(&self, script: Script) -> Result<ScriptResult, Error> {
         let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptResult, Error>>();
 
@@ -259,6 +302,22 @@ impl Runtime {
             .map_err(|e| Error::Unexpected(e.to_string()))?;
 
         res
+    }
+}
+
+#[cfg(feature = "with-axum")]
+impl<AppState> axum::extract::FromRequestParts<AppState> for Runtime
+where
+    Self: FromRef<AppState>,
+    AppState: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_ref(state))
     }
 }
 
@@ -502,12 +561,17 @@ mod tests {
                 args: Some(
                     json!({"items": [{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]}),
                 ),
-                code: "(props) => <ul>{props.items.map(({name}) => <li>{name}</li>)}</ul>".into(),
+                code:
+                    "(props) => <div><ul>{props.items.map(({name}) => <li>{name}</li>)}</ul></div>"
+                        .into(),
             })
             .await
             .unwrap();
 
-        assert_eq!(res.output, "<ul><li>first</li><li>second</li></ul>");
+        assert_eq!(
+            res.output,
+            "<div><ul><li>first</li><li>second</li></ul></div>"
+        );
     }
 
     #[tokio::test]

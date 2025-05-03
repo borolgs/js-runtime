@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["transpiling"]
+default = ["transpiling", "with-axum"]
 transpiling = ["deno_ast"]
+with-axum = ["axum"]
 
 [dependencies]
 thiserror = "2.0.12"
@@ -21,6 +22,8 @@ crossbeam = "0.8.4"
 
 quickjs-rusty = { version = "0.8.0", features = ['serde', 'chrono'] }
 deno_ast = { version = "0.46.6", features = ["transpiling"], optional = true }
+
+axum = { version = "0.8.4", optional = true, default-features = false }
 
 [lints]
 workspace = true
