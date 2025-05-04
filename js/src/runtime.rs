@@ -20,6 +20,8 @@ pub enum Error {
     Value(#[from] ValueError),
     #[error(transparent)]
     Serde(#[from] quickjs_rusty::serde::Error),
+    #[error(transparent)]
+    Context(#[from] quickjs_rusty::ContextError),
 
     #[cfg(feature = "transpiling")]
     #[error(transparent)]
@@ -62,22 +64,22 @@ pub enum Script {
     },
 }
 
+#[derive(Serialize, Debug)]
+pub struct ScriptOutput {
+    pub output: String,
+    pub console_output: String,
+}
+
 #[derive(Debug)]
 enum Function {
     Code(String),
     Compiled(JsCompiledFunction),
 }
 
-#[derive(Serialize, Debug)]
-pub struct ScriptResult {
-    pub output: String,
-    pub console_output: String,
-}
-
 enum Message {
     ExecuteScript {
         script: Script,
-        respond_to: tokio::sync::oneshot::Sender<Result<ScriptResult, Error>>,
+        respond_to: tokio::sync::oneshot::Sender<Result<ScriptOutput, Error>>,
     },
 }
 
@@ -109,80 +111,48 @@ impl Runtime {
         for i in 0..config.workers {
             let receiver = receiver.clone();
             let functions = functions.clone();
-            std::thread::spawn(move || {
-                log::debug!("worker spawned: {:?}", std::thread::current().id());
-                let context = Context::builder().build().unwrap();
-
-                let js_context = unsafe { context.context_raw() };
-
-                let ctx = to_js(js_context, &json!({"name": "script"})).unwrap();
-
-                context.set_global("ctx", ctx).unwrap();
-
-                let opaque: *mut std::ffi::c_void = std::ptr::null_mut();
-
-                context.set_module_loader(
-                    Box::new(module_loader),
-                    Some(Box::new(module_normalize)),
-                    opaque,
-                );
-
-                context.run_module("/jsx-runtime").unwrap();
-
-                let mut compiled_fns = HashMap::new();
-
-                #[allow(unused_mut)]
-                functions.into_iter().for_each(|(name, mut code)| {
-                    if name.ends_with(".ts") {
-                        #[cfg(feature = "transpiling")]
-                        {
-                            code = transpile(&code, None).unwrap();
-                        }
-
-                        #[cfg(not(feature = "transpiling"))]
-                        {
-                            panic!(
-                                "TypeScript is not supported. Enable the 'ts' feature to use it."
-                            );
-                        }
-                    }
-                    let compiled_fn = quickjs_rusty::compile::compile(js_context, &code, &name)
-                        .unwrap()
-                        .try_into_compiled_function()
-                        .unwrap();
-
-                    compiled_fns.insert(name, compiled_fn);
-                });
-
-                while let Ok(msg) = receiver.recv() {
-                    match msg {
-                        Message::ExecuteScript { script, respond_to } => {
-                            #[cfg(feature = "transpiling")]
-                            if let Script::Render { args, code } = script {
-                                let msg = Runtime::render_html(code, args, &context);
-                                _ = respond_to.send(msg);
-
-                                return;
-                            }
-
-                            let source = Runtime::prepare(script, &compiled_fns);
-
-                            let msg = match source {
-                                Ok((args, source)) => Runtime::eval(source, args, &context),
-                                Err(err) => Err(err),
-                            };
-
-                            _ = respond_to.send(msg);
-                        }
-                    };
-                }
-            });
+            Runtime::spawn_worker(receiver, functions)
         }
 
         Self { sender }
     }
 
-    fn prepare(
+    fn spawn_worker(
+        receiver: crossbeam::channel::Receiver<Message>,
+        functions: HashMap<String, String>,
+    ) {
+        std::thread::spawn(move || {
+            let (context, compiled_fns) = context::init(functions)
+                .map_err(|e| log::error!("failed to initialize runtime context: {}", e))
+                .expect("Runtime context initialization failed");
+
+            log::debug!("worker spawned: {:?}", std::thread::current().id());
+
+            while let Ok(msg) = receiver.recv() {
+                match msg {
+                    Message::ExecuteScript { script, respond_to } => {
+                        log::trace!("execute script: {:?}", script);
+                        #[cfg(feature = "transpiling")]
+                        if let Script::Render { args, code } = script {
+                            let msg = context::render_html(&context, args, code);
+                            _ = respond_to.send(msg);
+                        } else {
+                            let source = Runtime::prepare_script(script, &compiled_fns);
+
+                            let msg = match source {
+                                Ok((args, source)) => context::eval(&context, args, source),
+                                Err(err) => Err(err),
+                            };
+
+                            _ = respond_to.send(msg);
+                        }
+                    }
+                };
+            }
+        });
+    }
+
+    fn prepare_script(
         script: Script,
         compiled_fns: &HashMap<String, JsCompiledFunction>,
     ) -> Result<(Option<Value>, Function), Error> {
@@ -200,75 +170,13 @@ impl Runtime {
         }
     }
 
-    fn eval(
-        source: Function,
-        args: Option<Value>,
-        context: &Context,
-    ) -> Result<ScriptResult, Error> {
-        let console = Console::new();
-        let output = console.output.clone();
-
-        context.set_console(Box::new(console))?;
-
-        let js_context = unsafe { context.context_raw() };
-        let args = to_js(js_context, &args)?;
-        context.set_global("args", args)?;
-
-        let result = match source {
-            Function::Code(code) => context.eval(&code, false)?,
-            Function::Compiled(compiled_fn) => compiled_fn.eval()?,
-        };
-        let result = result.js_to_string()?;
-
-        let output = output.lock().unwrap();
-        let console_output = output.clone();
-
-        Ok(ScriptResult {
-            output: result,
-            console_output,
-        })
-    }
-
-    fn render_html<T>(
-        source: String,
-        args: Option<T>,
-        context: &Context,
-    ) -> Result<ScriptResult, Error>
-    where
-        T: Serialize,
-    {
-        let console = Console::new();
-        let output = console.output.clone();
-
-        context.set_console(Box::new(console))?;
-
-        let js_context = unsafe { context.context_raw() };
-        let args = to_js(js_context, &args)?;
-        context.set_global("args", args)?;
-
-        let code = format!("const Component = {source};");
-        let code = transpile_jsx(&code)?;
-        let code = format!(r#"{}globalThis._html = Component(args)"#, code);
-
-        context.eval_module(&code, false)?;
-        let result = context.eval("globalThis._html;", false)?.to_string()?;
-
-        let output = output.lock().unwrap();
-        let console_output = output.clone();
-
-        Ok(ScriptResult {
-            output: result,
-            console_output,
-        })
-    }
-
     #[cfg(feature = "with-axum")]
     pub async fn render(
         &self,
         args: Option<Value>,
         function: &str,
     ) -> impl axum::response::IntoResponse {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptResult, Error>>();
+        let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptOutput, Error>>();
 
         let msg = Message::ExecuteScript {
             script: Script::Render {
@@ -287,8 +195,8 @@ impl Runtime {
         res.map(|res| axum::response::Html(res.output))
     }
 
-    pub async fn execute_script(&self, script: Script) -> Result<ScriptResult, Error> {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptResult, Error>>();
+    pub async fn execute_script(&self, script: Script) -> Result<ScriptOutput, Error> {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptOutput, Error>>();
 
         let msg = Message::ExecuteScript {
             script,
@@ -321,28 +229,156 @@ where
     }
 }
 
-struct Console {
-    output: Arc<Mutex<String>>,
-}
+mod context {
+    use super::*;
 
-impl Console {
-    fn new() -> Self {
-        Self {
-            output: Arc::new(Mutex::new(String::from(""))),
+    pub struct Console {
+        pub output: Arc<Mutex<String>>,
+    }
+
+    impl Console {
+        pub fn new() -> Self {
+            Self {
+                output: Arc::new(Mutex::new(String::from(""))),
+            }
         }
     }
-}
 
-impl ConsoleBackend for Console {
-    fn log(&self, _level: Level, values: Vec<OwnedJsValue>) {
-        let output_line = values
-            .into_iter()
-            .map(|v| v.to_string().unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join(", ");
-        log::debug!("{output_line}");
-        let mut output = self.output.lock().unwrap();
-        writeln!(output, "{}", output_line).unwrap();
+    impl ConsoleBackend for Console {
+        fn log(&self, _level: Level, values: Vec<OwnedJsValue>) {
+            let output_line = values
+                .into_iter()
+                .map(|v| v.to_string().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::debug!("{output_line}");
+            let mut output = self.output.lock().unwrap();
+            writeln!(output, "{}", output_line).unwrap();
+        }
+    }
+
+    pub fn init(
+        functions: HashMap<String, String>,
+    ) -> Result<(Context, HashMap<String, JsCompiledFunction>), Error> {
+        let context = Context::builder().build()?;
+
+        let js_context = unsafe { context.context_raw() };
+
+        let ctx = to_js(js_context, &json!({"name": "script"}))?;
+
+        context.set_global("ctx", ctx)?;
+
+        let opaque: *mut std::ffi::c_void = std::ptr::null_mut();
+
+        context.set_module_loader(
+            Box::new(module_loader),
+            Some(Box::new(module_normalize)),
+            opaque,
+        );
+
+        context.run_module("/jsx-runtime")?;
+
+        // TODO
+        let mut compiled_fns = HashMap::new();
+
+        #[allow(unused_mut)]
+        for (name, mut code) in functions.into_iter() {
+            if name.ends_with(".ts") {
+                #[cfg(feature = "transpiling")]
+                {
+                    code = transpile(&code, None)?;
+                }
+
+                #[cfg(not(feature = "transpiling"))]
+                {
+                    panic!("TypeScript is not supported. Enable the 'ts' feature to use it.");
+                }
+            }
+            let compiled_fn = quickjs_rusty::compile::compile(js_context, &code, &name)?
+                .try_into_compiled_function()?;
+
+            compiled_fns.insert(name, compiled_fn);
+        }
+
+        Ok((context, compiled_fns))
+    }
+
+    fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
+        if module_name == "/jsx-runtime" {
+            return Ok(include_str!("./js/jsx.js").into());
+        }
+
+        Err(anyhow::anyhow!(format!("Module {module_name} not found")))
+    }
+
+    fn module_normalize(
+        module_base_name: &str,
+        module_name: &str,
+        opaque: *mut std::ffi::c_void,
+    ) -> anyhow::Result<String> {
+        Ok(module_name.to_string())
+    }
+
+    pub fn eval(
+        context: &Context,
+        args: Option<Value>,
+        source: Function,
+    ) -> Result<ScriptOutput, Error> {
+        let console = Console::new();
+        let output = console.output.clone();
+
+        context.set_console(Box::new(console))?;
+
+        let js_context = unsafe { context.context_raw() };
+        let args = to_js(js_context, &args)?;
+        context.set_global("args", args)?;
+
+        let result = match source {
+            Function::Code(code) => context.eval(&code, false)?,
+            Function::Compiled(compiled_fn) => compiled_fn.eval()?,
+        };
+        let result = result.js_to_string()?;
+
+        let output = output.lock().unwrap();
+        let console_output = output.clone();
+
+        Ok(ScriptOutput {
+            output: result,
+            console_output,
+        })
+    }
+
+    pub fn render_html<T>(
+        context: &Context,
+        args: Option<T>,
+        source: String,
+    ) -> Result<ScriptOutput, Error>
+    where
+        T: Serialize,
+    {
+        let console = Console::new();
+        let output = console.output.clone();
+
+        context.set_console(Box::new(console))?;
+
+        let js_context = unsafe { context.context_raw() };
+        let args = to_js(js_context, &args)?;
+        context.set_global("args", args)?;
+
+        let code = format!("const Component = {source};");
+        let code = transpile_jsx(&code)?;
+        let code = format!(r#"{}globalThis._html = Component(args)"#, code);
+
+        context.eval_module(&code, false)?;
+        let result = context.eval("globalThis._html;", false)?.to_string()?;
+
+        let output = output.lock().unwrap();
+        let console_output = output.clone();
+
+        Ok(ScriptOutput {
+            output: result,
+            console_output,
+        })
     }
 }
 
@@ -409,22 +445,6 @@ fn transpile_jsx(source: &str) -> Result<String, Error> {
         .into_source();
 
     Ok(res.text)
-}
-
-fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
-    if module_name == "/jsx-runtime" {
-        return Ok(include_str!("./js/jsx.js").into());
-    }
-
-    Err(anyhow::anyhow!(format!("Module {module_name} not found")))
-}
-
-fn module_normalize(
-    module_base_name: &str,
-    module_name: &str,
-    opaque: *mut std::ffi::c_void,
-) -> anyhow::Result<String> {
-    Ok(module_name.to_string())
 }
 
 #[cfg(test)]
@@ -556,6 +576,7 @@ mod tests {
     #[tokio::test]
     async fn render_html() {
         let runtime = Runtime::new(RuntimeConfig::default());
+
         let res = runtime
             .execute_script(Script::Render {
                 args: Some(
@@ -607,7 +628,7 @@ mod tests {
 
     #[test]
     fn example() {
-        let console = Console::new();
+        let console = context::Console::new();
         let output = console.output.clone();
 
         let context = Context::builder().console(console).build().unwrap();
@@ -622,7 +643,7 @@ mod tests {
 
         let context = context.reset().unwrap();
 
-        let console = Console::new();
+        let console = context::Console::new();
         let output = console.output.clone();
 
         _ = context.set_console(Box::new(console));

@@ -88,9 +88,8 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "axum_jsx=debug,js=debug,tower_http=debug,axum::rejection=trace".into()
-            }),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "js=trace,tower_http=debug,axum::rejection=trace".into()),
         )
         .with(
             tracing_subscriber::fmt::layer()
