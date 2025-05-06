@@ -24,6 +24,7 @@ quickjs-rusty = { version = "0.8.0", features = ['serde', 'chrono'] }
 deno_ast = { version = "0.46.6", features = ["transpiling"], optional = true }
 
 axum = { version = "0.8.4", optional = true, default-features = false }
+include_dir = "0.7.4"
 
 [lints]
 workspace = true

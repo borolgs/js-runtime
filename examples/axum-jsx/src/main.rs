@@ -40,19 +40,7 @@ impl IntoResponse for Error {
 }
 
 async fn index(runtime: js::Runtime) -> impl IntoResponse {
-    runtime
-        .render(
-            None,
-            r#"() => (
-                <div>
-                    <h1>My App</h1>
-                    <a href="/items">My Items</a>
-                </div>
-            )"#
-            .into(),
-        )
-        .await
-        .into_response()
+    runtime.render(None, "RootPage").await.into_response()
 }
 
 async fn function(runtime: js::Runtime) -> impl IntoResponse {
@@ -74,7 +62,7 @@ async fn items(runtime: js::Runtime) -> impl IntoResponse {
         ]
     });
     runtime
-        .render(Some(items), include_str!("./pages/items.jsx"))
+        .render(Some(items), "ItemsPage")
         .await
         .into_response()
 }
@@ -102,7 +90,11 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let runtime = js::Runtime::new(js::RuntimeConfig::default());
+    let runtime = js::Runtime::new(js::RuntimeConfig {
+        workers: 1,
+        js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
+        ..Default::default()
+    });
     let app = Router::new()
         .route("/", get(index))
         .route("/items", get(items))
