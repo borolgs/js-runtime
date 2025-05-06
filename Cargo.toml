@@ -2,7 +2,7 @@
 [workspace]
 
 resolver = "2"
-members = ["js", "examples/*"]
+members = ["js", "examples/*", "benchmarks"]
 
 [workspace.lints.rust]
 dead_code = "allow"

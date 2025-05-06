@@ -1,0 +1,36 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2018"
+
+[features]
+speedups = ["minijinja/speedups"]
+
+[dependencies]
+handlebars = "6.3.1"
+liquid = "0.26.11"
+minijinja = { version = "2.10.2", default-features = false, features = [
+    "unstable_machinery",
+    "multi_template",
+    "builtins",
+    "serde",
+] }
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.93"
+tera = "1.20.0"
+askama = "0.12.1"
+rinja = "0.3.5"
+
+include_dir = "0.7.4"
+js = { path = "../js" }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "templates"
+harness = false
+
+[[bench]]
+name = "comparison"
+harness = false
