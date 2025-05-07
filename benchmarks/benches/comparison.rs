@@ -174,14 +174,28 @@ pub fn bench_compare_render(c: &mut Criterion) {
             )
             .unwrap();
 
+        let js_context = unsafe { context.context_raw() };
+
+        let compiled_fn =
+            js::quickjs_rusty::compile::compile(js_context, "globalThis.Page(args)", "test.js")
+                .unwrap()
+                .try_into_compiled_function()
+                .unwrap();
+
         b.iter(|| {
             let ctx = black_box(Context::default());
-            js::context::eval(
-                &context,
-                Some(ctx),
-                js::Function::Code("globalThis.Page(args)".into()),
-            )
-            .unwrap();
+
+            let args = js::quickjs_rusty::serde::to_js(js_context, &ctx).unwrap();
+            context.set_global("args", args).unwrap();
+
+            compiled_fn.eval().unwrap();
+
+            // js::context::eval(
+            //     &context,
+            //     Some(ctx),
+            //     js::Function::Code("globalThis.Page(args)".into()),
+            // )
+            // .unwrap();
         });
     });
 

@@ -29,7 +29,8 @@ cmp_render/minijinja    time:   [4.4880 µs 4.4976 µs 4.5069 µs]
 cmp_render/rinja        time:   [916.30 ns 920.48 ns 924.88 ns]
 cmp_render/tera         time:   [6.9698 µs 6.9978 µs 7.0277 µs]
 
-cmp_render/quickjs      time:   [62.283 µs 62.400 µs 62.527 µs] NEW!
+cmp_render/quickjs      time:   [38.211 µs 38.359 µs 38.511 µs] NEW! compiled
+cmp_render/quickjs      time:   [62.344 µs 62.479 µs 62.628 µs] NEW! eval
 ```
 
 Note that Askama compiles templates as part of the Rust build
