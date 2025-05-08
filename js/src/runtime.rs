@@ -1,39 +1,16 @@
-use include_dir::Dir;
-use quickjs_rusty::{
-    Context, ExecutionError, JsCompiledFunction, OwnedJsValue, ValueError,
-    console::{ConsoleBackend, Level},
-    serde::to_js,
+use crate::{
+    Error,
+    context::{self, Function},
 };
+use include_dir::Dir;
+use quickjs_rusty::JsCompiledFunction;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::{collections::HashMap, fmt::Write};
+use serde_json::Value;
+use std::collections::HashMap;
 
 #[cfg(feature = "with-axum")]
 use axum::extract::FromRef;
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    Execution(#[from] ExecutionError),
-    #[error(transparent)]
-    Value(#[from] ValueError),
-    #[error(transparent)]
-    Serde(#[from] quickjs_rusty::serde::Error),
-    #[error(transparent)]
-    Context(#[from] quickjs_rusty::ContextError),
-
-    #[cfg(feature = "transpiling")]
-    #[error(transparent)]
-    Parse(#[from] deno_ast::ParseDiagnostic),
-    #[cfg(feature = "transpiling")]
-    #[error(transparent)]
-    Transpile(#[from] deno_ast::TranspileError),
-
-    #[error("unexpected")]
-    Unexpected(String),
-}
 
 #[cfg(feature = "with-axum")]
 impl axum::response::IntoResponse for Error {
@@ -75,20 +52,12 @@ pub struct ScriptOutput {
     pub console_output: String,
 }
 
-#[derive(Debug)]
-pub enum Function {
-    Code(String),
-    Compiled(JsCompiledFunction),
-}
-
 enum Message {
     ExecuteScript {
         script: Script,
         respond_to: tokio::sync::oneshot::Sender<Result<ScriptOutput, Error>>,
     },
 }
-
-static JS_SRC_DIR: OnceLock<Dir<'static>> = OnceLock::new();
 
 pub struct RuntimeConfig<'a> {
     pub workers: usize,
@@ -113,9 +82,9 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(config: RuntimeConfig<'static>) -> Self {
-        if let Some(dir) = config.js_src {
-            JS_SRC_DIR.get_or_init(|| dir);
-        }
+        context::init_module_loader(context::ContextConfig {
+            js_src: config.js_src,
+        });
 
         let (sender, receiver) = crossbeam::channel::unbounded::<Message>();
 
@@ -137,9 +106,13 @@ impl Runtime {
         std::thread::spawn(move || {
             log::debug!("spawn worker: {:?}", std::thread::current().id());
 
-            let (context, compiled_fns) = context::init(functions)
+            let context = context::init()
                 .map_err(|e| log::error!("failed to initialize runtime context: {}", e))
                 .expect("Runtime context initialization failed");
+
+            let compiled_fns = context::compile_functions(&context, functions).unwrap();
+
+            Runtime::init_jsx_renderer(&context).unwrap();
 
             while let Ok(msg) = receiver.recv() {
                 match msg {
@@ -158,6 +131,21 @@ impl Runtime {
                 };
             }
         });
+    }
+
+    fn init_jsx_renderer(context: &quickjs_rusty::Context) -> Result<(), Error> {
+        context.run_module("/jsx-runtime")?;
+
+        #[cfg(feature = "transpiling")]
+        if context::get_js_dir()
+            .map(|root| root.contains("pages/index.js"))
+            .unwrap_or(false)
+        {
+            log::debug!("Found 'pages/index.js', initiating page renderers...");
+            context.run_module("pages/index.js")?;
+        }
+
+        Ok(())
     }
 
     fn prepare_script(
@@ -244,275 +232,11 @@ where
     }
 }
 
-pub mod context {
-    use std::path::{Component, PathBuf};
-
-    use super::*;
-
-    pub struct Console {
-        pub output: Arc<Mutex<String>>,
-    }
-
-    impl Console {
-        pub fn new() -> Self {
-            Self {
-                output: Arc::new(Mutex::new(String::from(""))),
-            }
-        }
-    }
-
-    impl ConsoleBackend for Console {
-        fn log(&self, _level: Level, values: Vec<OwnedJsValue>) {
-            let output_line = values
-                .into_iter()
-                .map(|v| v.js_to_string().unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join(", ");
-            log::debug!("{output_line}");
-            let mut output = self.output.lock().unwrap();
-            writeln!(output, "{}", output_line).unwrap();
-        }
-    }
-
-    pub fn init(
-        functions: HashMap<String, String>,
-    ) -> Result<(Context, HashMap<String, JsCompiledFunction>), Error> {
-        let context = Context::builder().console(Console::new()).build()?;
-
-        let js_context = unsafe { context.context_raw() };
-
-        let ctx = to_js(js_context, &json!({"name": "script"}))?;
-
-        context.set_global("ctx", ctx)?;
-
-        let opaque: *mut std::ffi::c_void = std::ptr::null_mut();
-
-        context.set_module_loader(
-            Box::new(module_loader),
-            Some(Box::new(module_normalize)),
-            opaque,
-        );
-
-        context.run_module("/jsx-runtime")?;
-
-        #[cfg(feature = "transpiling")]
-        if JS_SRC_DIR
-            .get()
-            .map(|root| root.contains("pages/index.js"))
-            .unwrap_or(false)
-        {
-            context.run_module("pages/index.js")?;
-            //
-        }
-
-        // TODO
-        let mut compiled_fns = HashMap::new();
-
-        #[allow(unused_mut)]
-        for (name, mut code) in functions.into_iter() {
-            if name.ends_with(".ts") {
-                #[cfg(feature = "transpiling")]
-                {
-                    code = transpile(&code, None)?;
-                }
-
-                #[cfg(not(feature = "transpiling"))]
-                {
-                    panic!("TypeScript is not supported. Enable the 'ts' feature to use it.");
-                }
-            }
-            let compiled_fn = quickjs_rusty::compile::compile(js_context, &code, &name)?
-                .try_into_compiled_function()?;
-
-            compiled_fns.insert(name, compiled_fn);
-        }
-
-        Ok((context, compiled_fns))
-    }
-
-    fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
-        log::trace!("module_loader: {module_name}");
-        if module_name == "/jsx-runtime" {
-            return Ok(include_str!("./js/jsx.js").into());
-        }
-
-        let dir = JS_SRC_DIR
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("JS_SRC_DIR not initialized"))?;
-
-        let file = dir
-            .get_file(module_name)
-            .ok_or_else(|| anyhow::anyhow!("Module {module_name} not found"))?;
-
-        let source = file
-            .contents_utf8()
-            .ok_or_else(|| anyhow::anyhow!("Module {module_name} is not valid UTF-8"))?;
-
-        if module_name.ends_with(".jsx") {
-            #[cfg(feature = "transpiling")]
-            return transpile_jsx(source).map_err(|e| anyhow::anyhow!(e));
-
-            #[cfg(not(feature = "transpiling"))]
-            return Err(anyhow::anyhow!(
-                "JSX support requires the `transpiling` feature."
-            ));
-        }
-
-        Ok(source.to_string())
-    }
-
-    fn module_normalize(
-        module_base_name: &str,
-        module_name: &str,
-        opaque: *mut std::ffi::c_void,
-    ) -> anyhow::Result<String> {
-        let normalized_module_name =
-            if module_name.starts_with("./") || module_name.starts_with("../") {
-                let module_path = std::path::Path::new(module_base_name)
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(""))
-                    .join(module_name);
-
-                let mut parts = Vec::new();
-
-                for component in module_path.components() {
-                    match component {
-                        Component::ParentDir => {
-                            if let Some(last) = parts.last() {
-                                if *last != ".." {
-                                    parts.pop();
-                                    continue;
-                                }
-                            }
-                            parts.push("..");
-                        }
-                        Component::CurDir => {}
-                        Component::Normal(p) => parts.push(p.to_str().unwrap()),
-                        Component::RootDir => parts.clear(),
-                        _ => {}
-                    }
-                }
-
-                parts
-                    .iter()
-                    .collect::<PathBuf>()
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                module_name.to_string()
-            };
-
-        log::trace!(
-            "module_normalize: '{}' + '{}' -> '{}'",
-            module_base_name,
-            module_name,
-            normalized_module_name
-        );
-
-        Ok(normalized_module_name)
-    }
-
-    pub fn eval<Args>(
-        context: &Context,
-        args: Option<Args>,
-        source: Function,
-    ) -> Result<ScriptOutput, Error>
-    where
-        Args: Serialize,
-    {
-        let console = Console::new();
-        let output = console.output.clone();
-
-        context.set_console(Box::new(console))?;
-
-        let js_context = unsafe { context.context_raw() };
-
-        let args = to_js(js_context, &args)?;
-        context.set_global("args", args)?;
-
-        let result = match source {
-            Function::Code(code) => context.eval(&code, false)?,
-            Function::Compiled(compiled_fn) => compiled_fn.eval()?,
-        };
-        let result = result.js_to_string()?;
-
-        let output = output.lock().unwrap();
-        let console_output = output.clone();
-
-        Ok(ScriptOutput {
-            output: result,
-            console_output,
-        })
-    }
-}
-
-#[cfg(feature = "transpiling")]
-fn transpile(source: &str, ty: Option<deno_ast::MediaType>) -> Result<String, Error> {
-    let parsed = deno_ast::parse_script(deno_ast::ParseParams {
-        specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
-        text: source.into(),
-        media_type: ty.unwrap_or(deno_ast::MediaType::TypeScript),
-        capture_tokens: false,
-        scope_analysis: false,
-        maybe_syntax: None,
-    })?;
-
-    let res = parsed
-        .transpile(
-            &deno_ast::TranspileOptions {
-                imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
-                use_decorators_proposal: true,
-                ..Default::default()
-            },
-            &deno_ast::TranspileModuleOptions {
-                ..Default::default()
-            },
-            &deno_ast::EmitOptions {
-                source_map: deno_ast::SourceMapOption::Separate,
-                inline_sources: true,
-                ..Default::default()
-            },
-        )?
-        .into_source();
-
-    Ok(res.text)
-}
-
-#[cfg(feature = "transpiling")]
-fn transpile_jsx(source: &str) -> Result<String, Error> {
-    let parsed = deno_ast::parse_module(deno_ast::ParseParams {
-        specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
-        text: source.into(),
-        media_type: deno_ast::MediaType::Jsx,
-        capture_tokens: false,
-        scope_analysis: false,
-        maybe_syntax: None,
-    })?;
-
-    let res = parsed
-        .transpile(
-            &deno_ast::TranspileOptions {
-                imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
-                jsx_factory: "jsx".into(),
-                jsx_automatic: true,
-                ..Default::default()
-            },
-            &deno_ast::TranspileModuleOptions {
-                ..Default::default()
-            },
-            &deno_ast::EmitOptions {
-                source_map: deno_ast::SourceMapOption::Separate,
-                inline_sources: true,
-                ..Default::default()
-            },
-        )?
-        .into_source();
-
-    Ok(res.text)
-}
-
 #[cfg(test)]
 mod tests {
+    use quickjs_rusty::{Context, serde::to_js};
+    use serde_json::json;
+
     use super::*;
 
     #[tokio::test]
@@ -560,7 +284,7 @@ mod tests {
     fn test_transpile_ts() {
         let source = "export type A = {args; any}; function a(args: A): {res: any} {};";
         assert_eq!(
-            transpile(source.into(), None).unwrap(),
+            context::transpile(source.into(), None).unwrap(),
             "function a(args) {}\n"
         );
     }
