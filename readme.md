@@ -23,6 +23,11 @@ println!("{}", (res.console_output); // hello!
 [Render jsx](./examples/axum-jsx/src/main.rs):
 
 ```rust
+let runtime = js::Runtime::new(js::RuntimeConfig {
+    js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
+    ..Default::default()
+});
+
 async fn items(runtime: js::Runtime) -> impl IntoResponse {
     let items = json!({
         "items": [
@@ -32,7 +37,8 @@ async fn items(runtime: js::Runtime) -> impl IntoResponse {
         ]
     });
     runtime
-        .render(Some(items), include_str!("./pages/items.jsx"))
+        // src-js/pages/page_name.tsx
+        .render(Some(items), "page_name")
         .await
         .into_response()
 }

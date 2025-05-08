@@ -1,6 +1,6 @@
 import { Item } from "../components/item.jsx";
 
-export const ItemsPage = ({ items }) => {
+export default ({ items }) => {
   return (
     <div>
       <h1>My Items</h1>

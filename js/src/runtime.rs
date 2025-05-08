@@ -110,9 +110,11 @@ impl Runtime {
                 .map_err(|e| log::error!("failed to initialize runtime context: {}", e))
                 .expect("Runtime context initialization failed");
 
-            let compiled_fns = context::compile_functions(&context, functions).unwrap();
+            let mut compiled_fns = context::compile_functions(&context, functions).unwrap();
 
-            Runtime::init_jsx_renderer(&context).unwrap();
+            let page_fns = Runtime::init_jsx_renderer(&context).unwrap();
+
+            compiled_fns.extend(page_fns.into_iter());
 
             while let Ok(msg) = receiver.recv() {
                 match msg {
@@ -133,19 +135,61 @@ impl Runtime {
         });
     }
 
-    fn init_jsx_renderer(context: &quickjs_rusty::Context) -> Result<(), Error> {
+    fn init_jsx_renderer(
+        context: &quickjs_rusty::Context,
+    ) -> Result<HashMap<String, JsCompiledFunction>, Error> {
         context.run_module("/jsx-runtime")?;
 
+        let js_context = unsafe { context.context_raw() };
+
+        let mut compiled_fns = HashMap::new();
+
         #[cfg(feature = "transpiling")]
-        if context::get_js_dir()
-            .map(|root| root.contains("pages/index.js"))
-            .unwrap_or(false)
+        if let Some(pages_dir) = context::get_js_dir()
+            .map(|root| root.get_dir("pages"))
+            .flatten()
         {
-            log::debug!("Found 'pages/index.js', initiating page renderers...");
-            context.run_module("pages/index.js")?;
+            log::debug!("Found 'pages' dir, initiating page renderers...");
+
+            let pages = pages_dir
+                .files()
+                .map(|page| {
+                    let name = page.path().file_stem().unwrap().to_str().unwrap();
+                    let ext = page.path().extension().unwrap().to_str().unwrap();
+                    (name, ext)
+                })
+                .filter(|(_, e)| *e == "jsx")
+                .collect::<Vec<_>>();
+
+            let imports = pages
+                .iter()
+                .map(|(name, ext)| format!("import {0} from 'pages/{0}.{1}'", name, ext))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let names = pages
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let index = format!("{}\nglobalThis.__pages = {{ {} }};", imports, names);
+
+            let res = context.eval_module(&index, false);
+
+            for (name, _) in pages {
+                let compiled_fn = quickjs_rusty::compile::compile(
+                    js_context,
+                    &format!("globalThis.__pages.{}(args);", name),
+                    name,
+                )?
+                .try_into_compiled_function()?;
+
+                compiled_fns.insert(name.to_string(), compiled_fn);
+            }
         }
 
-        Ok(())
+        Ok(compiled_fns)
     }
 
     fn prepare_script(
@@ -154,15 +198,9 @@ impl Runtime {
     ) -> Result<(Option<Value>, Function), Error> {
         match script {
             #[cfg(feature = "transpiling")]
-            Script::RenderPage { args, name } => Ok((
-                args,
-                Function::Code(format!(
-                    "globalThis.Pages.{0} ? globalThis.Pages.{0}(args): 'Page \"{0}\" not found'",
-                    name
-                )),
-            )),
+            // Script::RenderPage { args, name } => Ok((args, Function::Compiled(name))),
             Script::Function { args, code } => Ok((args, Function::Code(code))),
-            Script::CompiledFunction { args, name } => {
+            Script::RenderPage { args, name } | Script::CompiledFunction { args, name } => {
                 let function = compiled_fns
                     .get(&name)
                     .ok_or(Error::Unexpected(format!("function {} not found", name)))?
