@@ -107,7 +107,7 @@ pub fn compile_functions(
         if name.ends_with(".ts") {
             #[cfg(feature = "transpiling")]
             {
-                code = transpile(&code, None)?;
+                code = transpile_sript(&code, None)?;
             }
 
             #[cfg(not(feature = "transpiling"))]
@@ -156,9 +156,9 @@ fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Re
         .contents_utf8()
         .ok_or_else(|| anyhow::anyhow!("Module {module_name} is not valid UTF-8"))?;
 
-    if module_name.ends_with(".jsx") {
+    if !module_name.ends_with(".js") {
         #[cfg(feature = "transpiling")]
-        return transpile_jsx(source).map_err(|e| anyhow::anyhow!(e));
+        return transpile_module(&file.path(), source).map_err(|e| anyhow::anyhow!(e));
 
         #[cfg(not(feature = "transpiling"))]
         return Err(anyhow::anyhow!(
@@ -254,9 +254,9 @@ where
 }
 
 #[cfg(feature = "transpiling")]
-pub fn transpile(source: &str, ty: Option<deno_ast::MediaType>) -> Result<String, Error> {
+pub fn transpile_sript(source: &str, ty: Option<deno_ast::MediaType>) -> Result<String, Error> {
     let parsed = deno_ast::parse_script(deno_ast::ParseParams {
-        specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
+        specifier: deno_ast::ModuleSpecifier::parse("file://script.ts").unwrap(),
         text: source.into(),
         media_type: ty.unwrap_or(deno_ast::MediaType::TypeScript),
         capture_tokens: false,
@@ -286,11 +286,18 @@ pub fn transpile(source: &str, ty: Option<deno_ast::MediaType>) -> Result<String
 }
 
 #[cfg(feature = "transpiling")]
-pub fn transpile_jsx(source: &str) -> Result<String, Error> {
+pub fn transpile_module(
+    path: &std::path::Path,
+    source: impl Into<String>,
+) -> Result<String, Error> {
+    let file_url = format!("file://{}", path.display());
+
+    let media_type = deno_ast::MediaType::from_path(path);
+
     let parsed = deno_ast::parse_module(deno_ast::ParseParams {
-        specifier: deno_ast::ModuleSpecifier::parse("test://script.ts").unwrap(),
-        text: source.into(),
-        media_type: deno_ast::MediaType::Jsx,
+        specifier: deno_ast::ModuleSpecifier::parse(&file_url).unwrap(),
+        text: Arc::from(source.into()),
+        media_type,
         capture_tokens: false,
         scope_analysis: false,
         maybe_syntax: None,

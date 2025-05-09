@@ -158,7 +158,7 @@ impl Runtime {
                     let ext = page.path().extension().unwrap().to_str().unwrap();
                     (name, ext)
                 })
-                .filter(|(_, e)| *e == "jsx")
+                .filter(|(_, e)| *e == "jsx" || *e == "tsx")
                 .collect::<Vec<_>>();
 
             let imports = pages
@@ -198,12 +198,19 @@ impl Runtime {
     ) -> Result<(Option<Value>, Function), Error> {
         match script {
             #[cfg(feature = "transpiling")]
-            // Script::RenderPage { args, name } => Ok((args, Function::Compiled(name))),
             Script::Function { args, code } => Ok((args, Function::Code(code))),
-            Script::RenderPage { args, name } | Script::CompiledFunction { args, name } => {
+            Script::CompiledFunction { args, name } => {
                 let function = compiled_fns
                     .get(&name)
-                    .ok_or(Error::Unexpected(format!("function {} not found", name)))?
+                    .ok_or(Error::Unexpected(format!("function '{}' not found", name)))?
+                    .to_owned();
+
+                Ok((args, Function::Compiled(function)))
+            }
+            Script::RenderPage { args, name } => {
+                let function = compiled_fns
+                    .get(&name)
+                    .ok_or(Error::Unexpected(format!("page '{}' not found", name)))?
                     .to_owned();
 
                 Ok((args, Function::Compiled(function)))
@@ -322,7 +329,7 @@ mod tests {
     fn test_transpile_ts() {
         let source = "export type A = {args; any}; function a(args: A): {res: any} {};";
         assert_eq!(
-            context::transpile(source.into(), None).unwrap(),
+            context::transpile_sript(source.into(), None).unwrap(),
             "function a(args) {}\n"
         );
     }
