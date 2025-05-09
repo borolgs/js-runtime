@@ -1,7 +1,10 @@
-export const Item = (props) => {
+export const Item = (props: {
+  id: string;
+  name: string;
+  description: string;
+}) => {
   return (
     <li
-      key={props.id}
       style={{
         border: "1px solid #ccc",
         padding: "12px",

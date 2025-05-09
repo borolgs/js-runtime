@@ -1,6 +1,6 @@
-import { Item } from "../components/item.jsx";
+import { Item } from "../components/item.tsx";
 
-export default ({ items }) => {
+export default ({ items }: { items: any[] }) => {
   return (
     <div>
       <h1>My Items</h1>
