@@ -3,4 +3,5 @@
 .DS_Store
 rustc-*.txt
 sqlite.*
-/node_modules
+node_modules
+dist
