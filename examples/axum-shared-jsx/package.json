@@ -1,0 +1,9 @@
+{
+  "name": "axum-shared-jsx-example",
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.10.0",
+  "devDependencies": {
+    "@kitajs/html": "^4.2.9",
+    "@kitajs/ts-html-plugin": "^4.1.1"
+  }
+}

@@ -18,5 +18,5 @@
     "plugins": [{ "name": "@kitajs/ts-html-plugin" }],
     "allowImportingTsExtensions": true
   },
-  "include": ["examples/axum-jsx/src-js/**/*"]
+  "include": ["src-js/**/*"]
 }

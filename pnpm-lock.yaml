@@ -6,7 +6,7 @@ settings:
 
 importers:
 
-  .:
+  examples/axum-simple-jsx:
     devDependencies:
       '@kitajs/html':
         specifier: ^4.2.9
