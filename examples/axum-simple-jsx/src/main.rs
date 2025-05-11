@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     let runtime = js::Runtime::new(js::RuntimeConfig {
         workers: 1,
-        js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
+        js_src_dir: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
         ..Default::default()
     });
     let app = Router::new()

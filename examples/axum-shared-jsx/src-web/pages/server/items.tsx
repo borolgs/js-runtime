@@ -1,5 +1,5 @@
-import { Item } from "../components/item.tsx";
-import { ServerLayout } from "../components/server-layout.tsx";
+import { Item } from "../../components/item.tsx";
+import { ServerLayout } from "../../components/server-layout.tsx";
 
 export default ({ items }: { items: any[] }) => {
   return (

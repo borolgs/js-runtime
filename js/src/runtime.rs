@@ -35,7 +35,7 @@ pub enum Script {
         args: Option<Value>,
         code: String,
     },
-    #[cfg(feature = "transpiling")]
+    #[cfg(all(feature = "transpiling", feature = "pages"))]
     RenderPage {
         args: Option<Value>,
         name: String,
@@ -62,7 +62,10 @@ enum Message {
 pub struct RuntimeConfig<'a> {
     pub workers: usize,
     pub functions: Option<HashMap<String, String>>,
-    pub js_src: Option<Dir<'a>>,
+    pub js_src_dir: Option<Dir<'a>>,
+    /// default: "pages"
+    #[cfg(feature = "pages")]
+    pub pages_dir: String,
 }
 
 impl<'a> Default for RuntimeConfig<'a> {
@@ -70,7 +73,9 @@ impl<'a> Default for RuntimeConfig<'a> {
         Self {
             workers: 5,
             functions: Some(HashMap::new()),
-            js_src: None,
+            js_src_dir: None,
+            #[cfg(feature = "pages")]
+            pages_dir: "pages".into(),
         }
     }
 }
@@ -83,7 +88,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(config: RuntimeConfig<'static>) -> Self {
         context::init_module_loader(context::ContextConfig {
-            js_src: config.js_src,
+            js_src: config.js_src_dir,
         });
 
         let (sender, receiver) = crossbeam::channel::unbounded::<Message>();
@@ -93,7 +98,7 @@ impl Runtime {
         for i in 0..config.workers {
             let receiver = receiver.clone();
             let functions = functions.clone();
-            Runtime::spawn_worker(receiver, functions)
+            Runtime::spawn_worker(receiver, functions, config.pages_dir.clone())
         }
 
         Self { sender }
@@ -102,6 +107,7 @@ impl Runtime {
     fn spawn_worker(
         receiver: crossbeam::channel::Receiver<Message>,
         functions: HashMap<String, String>,
+        pages_root: String,
     ) {
         std::thread::spawn(move || {
             log::debug!("spawn worker: {:?}", std::thread::current().id());
@@ -112,7 +118,7 @@ impl Runtime {
 
             let mut compiled_fns = context::compile_functions(&context, functions).unwrap();
 
-            let page_fns = Runtime::init_jsx_renderer(&context).unwrap();
+            let page_fns = Runtime::init_jsx_renderer(&context, pages_root).unwrap();
 
             compiled_fns.extend(page_fns.into_iter());
 
@@ -137,6 +143,7 @@ impl Runtime {
 
     fn init_jsx_renderer(
         context: &quickjs_rusty::Context,
+        pages_root: String,
     ) -> Result<HashMap<String, JsCompiledFunction>, Error> {
         context.run_module("/jsx-runtime")?;
 
@@ -144,12 +151,12 @@ impl Runtime {
 
         let mut compiled_fns = HashMap::new();
 
-        #[cfg(feature = "transpiling")]
+        #[cfg(all(feature = "transpiling", feature = "pages"))]
         if let Some(pages_dir) = context::get_js_dir()
-            .map(|root| root.get_dir("pages"))
+            .map(|root| root.get_dir(&pages_root))
             .flatten()
         {
-            log::debug!("Found 'pages' dir, initiating page renderers...");
+            log::debug!("Found '{pages_root}' dir, initiating page renderers...");
 
             let pages = pages_dir
                 .files()
@@ -163,7 +170,7 @@ impl Runtime {
 
             let imports = pages
                 .iter()
-                .map(|(name, ext)| format!("import {0} from 'pages/{0}.{1}'", name, ext))
+                .map(|(name, ext)| format!("import {0} from '{2}/{0}.{1}'", name, ext, pages_root))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -175,7 +182,7 @@ impl Runtime {
 
             let index = format!("{}\nglobalThis.__pages = {{ {} }};", imports, names);
 
-            let res = context.eval_module(&index, false);
+            let res = context.eval_module(&index, false)?;
 
             for (name, _) in pages {
                 let compiled_fn = quickjs_rusty::compile::compile(
@@ -218,7 +225,7 @@ impl Runtime {
         }
     }
 
-    #[cfg(all(feature = "with-axum", feature = "transpiling"))]
+    #[cfg(all(feature = "with-axum", feature = "transpiling", feature = "pages"))]
     pub async fn render(
         &self,
         args: Option<Value>,

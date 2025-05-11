@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["transpiling", "with-axum"]
+default = ["transpiling", "with-axum", "pages"]
 transpiling = ["deno_ast"]
 with-axum = ["axum"]
+pages = []
 
 [dependencies]
 thiserror = "2.0.12"

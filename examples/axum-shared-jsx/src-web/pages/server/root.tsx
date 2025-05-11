@@ -1,4 +1,4 @@
-import { ServerLayout } from "../components/server-layout.tsx";
+import { ServerLayout } from "../../components/server-layout.tsx";
 
 export default () => (
   <ServerLayout title="My App">
