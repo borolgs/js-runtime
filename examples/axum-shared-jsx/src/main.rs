@@ -1,4 +1,11 @@
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    body::Body,
+    extract::Path,
+    http::{HeaderValue, Response, StatusCode, Uri, header},
+    response::IntoResponse,
+    routing::get,
+};
 use tracing_subscriber::prelude::*;
 
 use axum_macros::FromRef;
@@ -39,6 +46,13 @@ impl IntoResponse for Error {
     }
 }
 
+static STATIC_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/static");
+
+#[derive(FromRef, Clone)]
+pub struct AppState {
+    runtime: js::Runtime,
+}
+
 async fn index(runtime: js::Runtime) -> impl IntoResponse {
     runtime.render(None, "root").await.into_response()
 }
@@ -54,9 +68,42 @@ async fn items(runtime: js::Runtime) -> impl IntoResponse {
     runtime.render(Some(items), "items").await.into_response()
 }
 
-#[derive(FromRef, Clone)]
-pub struct AppState {
-    runtime: js::Runtime,
+async fn spa_index() -> impl IntoResponse {
+    if let Some(index) = STATIC_DIR.get_file("app/index.html") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str("text/html").unwrap(),
+            )
+            .body(Body::from(index.contents().to_owned()))
+            .unwrap();
+    };
+
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn assets(Path(path): Path<String>, uri: Uri) -> impl IntoResponse {
+    let path = if path.starts_with("assets") {
+        uri.to_string().trim_start_matches('/').to_string()
+    } else {
+        path
+    };
+
+    if let Some(file) = STATIC_DIR.get_file(&path) {
+        let mime_type = mime_guess::from_path(path).first_or_text_plain();
+
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(mime_type.as_ref()).unwrap(),
+            )
+            .body(Body::from(file.contents().to_owned()))
+            .unwrap();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 #[tokio::main]
@@ -80,12 +127,16 @@ async fn main() -> anyhow::Result<()> {
 
     let runtime = js::Runtime::new(js::RuntimeConfig {
         workers: 1,
-        js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
+        js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-web")),
         ..Default::default()
     });
+
     let app = Router::new()
         .route("/", get(index))
         .route("/items", get(items))
+        .route("/app", get(spa_index))
+        .route("/app/{*path}", get(assets))
+        .route("/assets/{*path}", get(assets))
         .with_state(AppState { runtime });
 
     let listener = TcpListener::bind(format!("127.0.0.1:4000")).await?;

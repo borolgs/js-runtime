@@ -1,8 +1,9 @@
 import { Item } from "../components/item.tsx";
+import { ServerLayout } from "../components/server-layout.tsx";
 
 export default ({ items }: { items: any[] }) => {
   return (
-    <div>
+    <ServerLayout title="My Items">
       <h1>My Items</h1>
       <a href="/">back</a>
       <ul style={{ listStyleType: "none", padding: 0 }}>
@@ -10,6 +11,6 @@ export default ({ items }: { items: any[] }) => {
           <Item {...item} />
         ))}
       </ul>
-    </div>
+    </ServerLayout>
   );
 };

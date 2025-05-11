@@ -10,6 +10,7 @@ function App() {
   return (
     <>
       <h1>SPA Application</h1>
+      <a href="/">back</a>
       <h2>My Items</h2>
       <ul style={{ listStyleType: "none", padding: 0 }}>
         {items.map((item) => (

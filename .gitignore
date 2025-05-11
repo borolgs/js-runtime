@@ -5,3 +5,4 @@ rustc-*.txt
 sqlite.*
 node_modules
 dist
+examples/axum-shared-jsx/static/app
