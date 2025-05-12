@@ -20,6 +20,8 @@
     "vite": "^6.3.5"
   },
   "dependencies": {
+    "@tanstack/react-router": "^1.120.3",
+    "@tanstack/react-router-devtools": "^1.120.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   }

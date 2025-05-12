@@ -20,11 +20,14 @@ println!("{}", res.output); // 4
 println!("{}", (res.console_output); // hello!
 ```
 
-[Render jsx](./examples/axum-jsx/src/main.rs):
+## Render JSX
+
+- [Simple](examples/axum-simple-jsx) – a basic example of server-side rendering
+- [With React](examples/axum-shared-jsx) – a hybrid app: a SPA on one route and traditional server-rendered pages on the others, with component sharing
 
 ```rust
 let runtime = js::Runtime::new(js::RuntimeConfig {
-    js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-js")),
+    js_src: Some(include_dir::include_dir!("$CARGO_MANIFEST_DIR/src-web")),
     ..Default::default()
 });
 
@@ -37,9 +40,34 @@ async fn items(runtime: js::Runtime) -> impl IntoResponse {
         ]
     });
     runtime
-        // src-js/pages/page_name.tsx
-        .render(Some(items), "page_name")
+        // src-web/pages/items.tsx
+        .render(Some(items), "items")
         .await
         .into_response()
 }
+```
+
+For server pages, use default exports.
+
+These pages are rendered using a vendored version of [@kitajs/html](https://github.com/kitajs/html),
+so the React Hook API is not available in this context.
+
+```tsx
+// src-web/pages/items.tsx
+
+import { Item } from "../components/item.tsx";
+
+export default ({ items }: { items: any[] }) => {
+  return (
+    <div>
+      <h1>My Items</h1>
+      <a href="/">back</a>
+      <ul style={{ listStyleType: "none", padding: 0 }}>
+        {items.map((item) => (
+          <Item {...item} />
+        ))}
+      </ul>
+    </div>
+  );
+};
 ```
