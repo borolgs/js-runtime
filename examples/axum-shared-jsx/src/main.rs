@@ -54,7 +54,7 @@ pub struct AppState {
 }
 
 async fn index(runtime: js::Runtime) -> impl IntoResponse {
-    runtime.render(None, "root").await.into_response()
+    runtime.render(json!({}), "root").await.into_response()
 }
 
 async fn items(runtime: js::Runtime) -> impl IntoResponse {
@@ -65,7 +65,7 @@ async fn items(runtime: js::Runtime) -> impl IntoResponse {
             { "id": 3, "name": "Item C", "description": "Yet another item here." }
         ]
     });
-    runtime.render(Some(items), "items").await.into_response()
+    runtime.render(items, "items").await.into_response()
 }
 
 async fn spa_index() -> impl IntoResponse {

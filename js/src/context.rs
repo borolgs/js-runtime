@@ -49,6 +49,8 @@ impl Console {
     }
 }
 
+struct ResolveContext {}
+
 impl ConsoleBackend for Console {
     fn log(&self, _level: Level, values: Vec<OwnedJsValue>) {
         let output_line = values
@@ -83,12 +85,12 @@ pub fn init() -> Result<Context, Error> {
 
     context.set_global("ctx", ctx)?;
 
-    let opaque: *mut std::ffi::c_void = std::ptr::null_mut();
+    let opaque = ResolveContext {};
 
     context.set_module_loader(
         Box::new(module_loader),
         Some(Box::new(module_normalize)),
-        opaque,
+        &opaque as *const _ as *mut _,
     );
 
     Ok(context)
@@ -124,7 +126,7 @@ pub fn compile_functions(
     Ok(compiled_fns)
 }
 
-fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
+pub fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Result<String> {
     log::trace!("module_loader: {module_name}");
 
     // built-in
@@ -169,7 +171,7 @@ fn module_loader(module_name: &str, opaque: *mut std::ffi::c_void) -> anyhow::Re
     Ok(source.to_string())
 }
 
-fn module_normalize(
+pub fn module_normalize(
     module_base_name: &str,
     module_name: &str,
     opaque: *mut std::ffi::c_void,
@@ -328,6 +330,7 @@ pub fn transpile_module(
 #[cfg(test)]
 mod tests {
     use include_dir::File;
+    use quickjs_rusty::{module_loader::ModuleLoader, utils::make_cstring};
     use serde_json::Value;
 
     use super::*;

@@ -2,7 +2,7 @@ use crate::{
     Error,
     context::{self, Function},
 };
-use include_dir::Dir;
+use include_dir::{Dir, DirEntry};
 use quickjs_rusty::JsCompiledFunction;
 
 use serde::{Deserialize, Serialize};
@@ -151,44 +151,98 @@ impl Runtime {
 
         let mut compiled_fns = HashMap::new();
 
-        #[cfg(all(feature = "transpiling", feature = "pages"))]
-        if let Some(pages_dir) = context::get_js_dir()
-            .map(|root| root.get_dir(&pages_root))
-            .flatten()
-        {
-            log::debug!("Found '{pages_root}' dir, initiating page renderers...");
+        struct Page {
+            path: String,
+            name: String,
+            ext: String,
+            import_name: String,
+            import_statement: String,
+        }
 
-            let pages = pages_dir
-                .files()
-                .map(|page| {
-                    let name = page.path().file_stem().unwrap().to_str().unwrap();
-                    let ext = page.path().extension().unwrap().to_str().unwrap();
-                    (name, ext)
+        impl Page {
+            fn new(page: &include_dir::File) -> Self {
+                let path = page.path().to_str().unwrap();
+                let name = page.path().file_stem().unwrap().to_str().unwrap();
+                let ext = page.path().extension().unwrap().to_str().unwrap();
+
+                let import_name = name
+                    .split(".")
+                    .collect::<Vec<_>>()
+                    .first()
+                    .unwrap()
+                    .to_string();
+                let import_statement = format!("import * as {0} from '{1}'", import_name, path);
+
+                Self {
+                    path: path.into(),
+                    name: name.into(),
+                    ext: ext.into(),
+                    import_name,
+                    import_statement,
+                }
+            }
+        }
+
+        #[cfg(all(feature = "transpiling", feature = "pages"))]
+        if let Some(root_dir) = context::get_js_dir() {
+            let mut pages: HashMap<String, Page> = HashMap::new();
+
+            root_dir
+                .find("**/*.page.[tj]sx")
+                .unwrap()
+                .filter_map(|f| match f {
+                    DirEntry::Dir(dir) => None,
+                    DirEntry::File(file) => Some(Page::new(file)),
                 })
-                .filter(|(_, e)| *e == "jsx" || *e == "tsx")
-                .collect::<Vec<_>>();
+                .for_each(|page| {
+                    let name = page.name.to_string();
+                    if let Some(old_page) = pages.insert(name, page) {
+                        panic!(
+                            "Page name must be unique. Page '{}' has already been added at '{}'",
+                            old_page.name, old_page.path
+                        );
+                    }
+                });
+
+            let pages = pages.values().collect::<Vec<_>>();
 
             let imports = pages
                 .iter()
-                .map(|(name, ext)| format!("import {0} from '{2}/{0}.{1}'", name, ext, pages_root))
+                .map(|page| page.import_statement.clone())
                 .collect::<Vec<_>>()
                 .join("\n");
 
             let names = pages
                 .iter()
-                .map(|(name, _)| *name)
+                .map(|page| page.import_name.clone())
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            let index = format!("{}\nglobalThis.__pages = {{ {} }};", imports, names);
+            let index = format!(
+                r#"{}
+                let pages = {{ {} }};
+                globalThis.__views = {{}};
+                globalThis.__viewNames = [];
+                for (const [pageName, fns] of Object.entries(pages)) {{
+                    for (const [name, fn] of Object.entries(fns)) {{
+                        const viewName = name === 'default' ? pageName : `${{pageName}}.${{name}}`;
+                        globalThis.__views[viewName] = fn;
+                        globalThis.__viewNames.push(viewName);
+                    }}
+                }}
+                "#,
+                imports, names
+            );
 
-            let res = context.eval_module(&index, false)?;
+            _ = context.eval_module(&index, false)?;
 
-            for (name, _) in pages {
+            let view_names = context.eval_as::<Vec<String>>("globalThis.__viewNames;")?;
+
+            for name in view_names {
                 let compiled_fn = quickjs_rusty::compile::compile(
                     js_context,
-                    &format!("globalThis.__pages.{}(args);", name),
-                    name,
+                    &format!("globalThis.__views['{0}'](args);", name),
+                    &name,
                 )?
                 .try_into_compiled_function()?;
 
@@ -226,16 +280,12 @@ impl Runtime {
     }
 
     #[cfg(all(feature = "with-axum", feature = "transpiling", feature = "pages"))]
-    pub async fn render(
-        &self,
-        args: Option<Value>,
-        page: &str,
-    ) -> impl axum::response::IntoResponse {
+    pub async fn render(&self, args: Value, page: &str) -> impl axum::response::IntoResponse {
         let (sender, receiver) = tokio::sync::oneshot::channel::<Result<ScriptOutput, Error>>();
 
         let msg = Message::ExecuteScript {
             script: Script::RenderPage {
-                args,
+                args: Some(args),
                 name: page.into(),
             },
             respond_to: sender,
